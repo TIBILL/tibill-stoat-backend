@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
-    http::{header, HeaderMap, Method},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -463,6 +463,7 @@ async fn fetch_preview(
 )]
 async fn fetch_file(
     State(db): State<Database>,
+    req_headers: HeaderMap,
     Path((tag, file_id, file_name)): Path<(Tag, String, String)>,
 ) -> Result<Response> {
     let tag: &'static str = tag.clone().into();
@@ -478,31 +479,87 @@ async fn fetch_file(
         return Err(create_error!(NotFound));
     }
 
-    // Ensure filename is correct
-    if file_name != file.filename {
-        if file_name == "original" {
-            let safe_filename = encode_component(&file.filename);
-
-            return Ok(
-                Redirect::permanent(&format!("/{tag}/{file_id}/{}", safe_filename)).into_response(),
-            );
-        }
-
+    // Ensure filename is correct, "original" is served directly without redirect
+    if file_name != file.filename && file_name != "original" {
         return Err(create_error!(NotFound));
     }
 
     let hash = file.as_hash(&db).await?;
-    retrieve_file_by_hash(&hash).await.map(|data| {
-        (
-            [
-                (header::CONTENT_TYPE, hash.content_type),
-                (header::CONTENT_DISPOSITION, "attachment".to_owned()),
-                (header::CACHE_CONTROL, CACHE_CONTROL.to_owned()),
-            ],
-            data,
-        )
-            .into_response()
-    })
+    let data = retrieve_file_by_hash(&hash).await?;
+    let total_size = data.len();
+
+    // Use inline disposition for media types so browsers can stream them
+    let content_disposition =
+        if hash.content_type.starts_with("video/") || hash.content_type.starts_with("audio/") {
+            "inline".to_owned()
+        } else {
+            "attachment".to_owned()
+        };
+
+    // Handle Range requests (HTTP 206) for video/audio seeking
+    if let Some(range_val) = req_headers.get(header::RANGE) {
+        if let Ok(range_str) = range_val.to_str() {
+            if let Some((start, end)) = parse_range(range_str, total_size) {
+                let chunk = data[start..=end].to_vec();
+                return Ok((
+                    StatusCode::PARTIAL_CONTENT,
+                    [
+                        (header::CONTENT_TYPE, hash.content_type),
+                        (header::CONTENT_DISPOSITION, content_disposition),
+                        (header::CACHE_CONTROL, CACHE_CONTROL.to_owned()),
+                        (header::ACCEPT_RANGES, "bytes".to_owned()),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{end}/{total_size}"),
+                        ),
+                        (header::CONTENT_LENGTH, chunk.len().to_string()),
+                    ],
+                    chunk,
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, hash.content_type),
+            (header::CONTENT_DISPOSITION, content_disposition),
+            (header::CACHE_CONTROL, CACHE_CONTROL.to_owned()),
+            (header::ACCEPT_RANGES, "bytes".to_owned()),
+            (header::CONTENT_LENGTH, total_size.to_string()),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+/// Parse a `Range: bytes=X-Y` header, returns `(start, end)` inclusive indices.
+fn parse_range(range: &str, total: usize) -> Option<(usize, usize)> {
+    let range = range.strip_prefix("bytes=")?;
+    let mut parts = range.splitn(2, '-');
+    let start_str = parts.next()?;
+    let end_str = parts.next()?;
+
+    let (start, end) = if start_str.is_empty() {
+        // Suffix range: bytes=-N (last N bytes)
+        let n: usize = end_str.parse().ok()?;
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let start: usize = start_str.parse().ok()?;
+        let end = if end_str.is_empty() {
+            total - 1
+        } else {
+            end_str.parse::<usize>().ok()?.min(total - 1)
+        };
+        (start, end)
+    };
+
+    if start > end || start >= total {
+        return None;
+    }
+
+    Some((start, end))
 }
 
 /// Fetch original file (Moderation)
