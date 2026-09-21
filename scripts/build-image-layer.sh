@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # If you're having trouble building this locally or on your CI, try lowering
 # the job count via CARGO_BUILD_JOBS. It defaults to 10.
 
@@ -74,11 +75,15 @@ apps() {
   touch -am \
     crates/bonfire/src/main.rs \
     crates/delta/src/main.rs \
+    crates/services/autumn/src/main.rs \
+    crates/services/january/src/main.rs \
+    crates/services/gifbox/src/main.rs \
     crates/daemons/crond/src/main.rs \
     crates/daemons/pushd/src/main.rs \
     crates/daemons/voice-ingress/src/main.rs \
     crates/core/config/src/lib.rs \
     crates/core/database/src/lib.rs \
+    crates/core/files/src/lib.rs \
     crates/core/models/src/lib.rs \
     crates/core/parser/src/lib.rs \
     crates/core/permissions/src/lib.rs \
@@ -86,7 +91,7 @@ apps() {
     crates/core/result/src/lib.rs \
     crates/core/coalesced/src/lib.rs \
     crates/core/ratelimits/src/lib.rs
-  
+
   if [ -z "$TARGETARCH" ]; then
     cargo build -j "${CARGO_BUILD_JOBS:-10}" --locked --release
   else
